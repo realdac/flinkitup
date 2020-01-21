@@ -6,8 +6,6 @@ services:
       - "6123"
     ports:
       - "8081:8081"
-    volumes:
-      - ./ErrorStreamSetB.csv:/home/ErrorStreamSetB.csv
     command: jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=jobmanager
