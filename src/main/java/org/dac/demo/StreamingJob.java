@@ -18,11 +18,18 @@
 
 package org.dac.demo;
 
+import java.io.File;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
+
+import io.airlift.log.Logger;
 
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.java.tuple.Tuple3;
@@ -39,6 +46,8 @@ import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.Preconditions;
 import org.dac.demo.util.Data;
 import org.apache.flink.api.java.utils.*;
+
+import static org.apache.flink.core.fs.FileSystem.WriteMode.OVERWRITE;
 
 /**
  * Skeleton for a Flink Streaming Job.
@@ -57,6 +66,7 @@ public class StreamingJob {
 // *************************************************************************
 	// PROGRAM
 	// *************************************************************************
+	private static final Logger log = Logger.get(StreamingJob.class);
 
 	private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd H:mm:ss");
 
@@ -85,30 +95,37 @@ public class StreamingJob {
 		env.getConfig().setGlobalJobParameters(params);
 		env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
 
-		// get input data
 		DataStream<String> text = null;
 		if (params.has("input")) {
 			text = env.readTextFile(params.get("input"));
-			// union all the inputs from text files
-/*			for (String input : params.get("input")) {
-				if (text == null) {
-					text = env.readTextFile(input);
-				} else {
-					text = text.union(env.readTextFile(input));
-				}
-			}*/
+
+			// Equivalent:
+			//			Path filePath = new File(params.get("input")).toPath();
+			//			Charset charset = Charset.defaultCharset();
+			//			List<String> stringList = Files.readAllLines(filePath, charset);
+			//			text = env.fromElements(stringList.toArray(new String[]{}));
+
 			Preconditions.checkNotNull(text, "Input DataStream should not be null.");
 		} else {
 			System.out.println("Executing ErrorDetection example with default input data set.");
 			System.out.println("Use --input to specify file input.");
+
 			// get default test text data
 			text = env.fromElements(Data.ERROR_LOGS);
 		}
 
-		DataStream<Tuple4<String, String, String, Integer>> timestampEvents = text.flatMap(new Tokenizer()).assignTimestampsAndWatermarks(new AscendingTimestampExtractor<Tuple4<String, String, String, Integer>>() {
+		DataStream<Tuple4<String, String, String, Integer>> timestampEvents = text.flatMap(new Tokenizer())
+				.assignTimestampsAndWatermarks(new AscendingTimestampExtractor<Tuple4<String, String, String, Integer>>() {
 			@Override
 			public long extractAscendingTimestamp(Tuple4<String, String, String, Integer> element) {
-				LocalDateTime dateTime = LocalDateTime.parse(DUMMYDATE + ' ' + element.f0, FORMATTER);
+				LocalDateTime dateTime;
+				if (element.f0 != null) {
+					dateTime = LocalDateTime.parse(element.f0, FORMATTER);
+				}
+				else {
+					dateTime = LocalDateTime.parse("Null token[0]", FORMATTER);
+				}
+
 				ZonedDateTime zdt = dateTime.atZone(ZoneId.of("America/Los_Angeles"));
 				return zdt.toInstant().toEpochMilli();
 			}
@@ -146,6 +163,7 @@ public class StreamingJob {
 		// emit result
 		OutputTag[] vers = {oldVersion, newVersion};
 		System.out.println("Processing...");
+
 		for (OutputTag<Tuple4<String, String, String, Integer>> i : vers) {
 			if (params.has("output")) {
 				streams.getSideOutput(i)
@@ -154,9 +172,11 @@ public class StreamingJob {
 					// group by the tuple field "0" and sum up tuple field "1"
 					.sum(3)
 					.flatMap(new Trim())
-					.writeAsText(params.get("output") + i.getId());
+					.writeAsText(params.get("output") + i.getId(), OVERWRITE);
+				System.out.println("Completed writing output file " + params.get("output") + i.getId());
 			} else {
 				System.out.println("Printing result to stdout. Use --output to specify output path.");
+				System.out.println(streams.getSideOutput(i));
 				streams.getSideOutput(i).print();
 			}
 
@@ -186,9 +206,10 @@ public class StreamingJob {
 		@Override
 		public void flatMap(String value, Collector<Tuple4<String, String, String, Integer>> out) {
 			// normalize and split the line
-			String[] tokens = value.toLowerCase().split("\\s+");
-			System.out.println(tokens.toString());
-			out.collect(new Tuple4<>(tokens[0], tokens[1], tokens[2], 1));
+			String[] tokens = value.toLowerCase().trim().split("\\s+");
+			// ** token[0] has leading white space/tab but couldn't be removed by trim.
+			// Use following workaround. Keep only non-alphanumeric characters.
+			out.collect(new Tuple4<>(DUMMYDATE + ' ' + tokens[0].replaceAll("^[^a-zA-Z0-9\\s]+|[^a-zA-Z0-9\\s]+$", ""), tokens[1], tokens[2], 1));
 		}
 	}
 
