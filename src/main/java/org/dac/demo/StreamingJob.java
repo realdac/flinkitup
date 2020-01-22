@@ -26,26 +26,35 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-
-import io.airlift.log.Logger;
+import java.util.Map;
 
 import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.connectors.elasticsearch.ElasticsearchSinkFunction;
+import org.apache.flink.streaming.connectors.elasticsearch.RequestIndexer;
+import org.apache.flink.streaming.connectors.elasticsearch6.ElasticsearchSink;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.Preconditions;
+import org.apache.http.HttpHost;
 import org.dac.demo.util.Data;
-import org.apache.flink.api.java.utils.*;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.client.Requests;
+
+import io.airlift.log.Logger;
 
 import static org.apache.flink.core.fs.FileSystem.WriteMode.OVERWRITE;
 
@@ -97,13 +106,13 @@ public class StreamingJob {
 
 		DataStream<String> text = null;
 		if (params.has("input")) {
-			text = env.readTextFile(params.get("input"));
+			//text = env.readTextFile(params.get("input"));
 
 			// Equivalent:
-			//			Path filePath = new File(params.get("input")).toPath();
-			//			Charset charset = Charset.defaultCharset();
-			//			List<String> stringList = Files.readAllLines(filePath, charset);
-			//			text = env.fromElements(stringList.toArray(new String[]{}));
+			Path filePath = new File(params.get("input")).toPath();
+			Charset charset = Charset.defaultCharset();
+			List<String> stringList = Files.readAllLines(filePath, charset);
+			text = env.fromElements(stringList.toArray(new String[]{}));
 
 			Preconditions.checkNotNull(text, "Input DataStream should not be null.");
 		} else {
@@ -149,16 +158,15 @@ public class StreamingJob {
 		final int windowSize = params.getInt("window", 1);
 		final int slideSize = params.getInt("slide", 1);
 
-//		final Boolean writeToElasticsearch = false;
-//		Map<String, String> userConfig = new HashMap<>();
-//		userConfig.put("cluster.name", "elasticsearch");
-//		// This instructs the sink to emit after every element, otherwise they would be buffered
-//		userConfig.put(ElasticsearchSink.CONFIG_KEY_BULK_FLUSH_MAX_ACTIONS, "1");
+		//final Boolean writeToElasticsearch = false;
+		Map<String, String> userConfig = new HashMap<>();
+		userConfig.put("cluster.name", "elasticsearch");
+		// This instructs the sink to emit after every element, otherwise they would be buffered
+		userConfig.put(ElasticsearchSink.CONFIG_KEY_BULK_FLUSH_MAX_ACTIONS, "1");
 
-/*
-		List<InetSocketAddress> transports = new ArrayList<>();
-		transports.add(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 9300));
-*/
+		List<HttpHost> httpHosts = new ArrayList<>();
+		httpHosts.add(new HttpHost("172.19.0.3", 9200, "http"));
+//		httpHosts.add(new HttpHost("10.2.3.1", 9300, "http"));
 
 		// emit result
 		OutputTag[] vers = {oldVersion, newVersion};
@@ -173,22 +181,65 @@ public class StreamingJob {
 					.sum(3)
 					.flatMap(new Trim())
 					.writeAsText(params.get("output") + i.getId(), OVERWRITE);
+				log.info("Completed writing output file " + params.get("output") + i.getId());
+				log.debug("test debug");
 				System.out.println("Completed writing output file " + params.get("output") + i.getId());
 			} else {
+				log.debug("Printing result to stdout. Use --output to specify output path.");
 				System.out.println("Printing result to stdout. Use --output to specify output path.");
 				System.out.println(streams.getSideOutput(i));
 				streams.getSideOutput(i).print();
 			}
 
-		/*	if (writeToElasticsearch) {
+			if (params.has("writeToElasticsearch")) {
+				log.info("Write to elasticSearch");
+				ElasticsearchSink.Builder<Tuple4<String, String, String, Integer>> esSinkBuilder = new ElasticsearchSink.Builder<>(
+						httpHosts, new ElasticsearchSinkFunction<Tuple4<String, String, String, Integer>> (){
+
+					public IndexRequest createIndexRequest(Tuple4<String, String, String, Integer> element) {
+						Map<String, Object> json = new HashMap<>();
+						json.put("timestamp", element.f0);
+						json.put("version", element.f1);
+						json.put("error_code", element.f2);
+						json.put("count", element.f3);
+
+						return Requests.indexRequest()
+								.index("nyc-places")
+								.type("popular-locations")
+								.source(json);
+					}
+
+					@Override
+					public void process(Tuple4<String, String, String, Integer> element, RuntimeContext ctx, RequestIndexer indexer) {
+						indexer.add(createIndexRequest(element));
+					}
+				});
+
+				// configuration for the bulk requests; this instructs the sink to emit after every element, otherwise they would be buffered
+				esSinkBuilder.setBulkFlushMaxActions(1);
+
+				// provide a RestClientFactory for custom configuration on the internally created REST client
+//				esSinkBuilder.setRestClientFactory(
+//						restClientBuilder -> {
+//							restClientBuilder.setDefaultHeaders(...)
+//							restClientBuilder.setMaxRetryTimeoutMillis(...)
+//							restClientBuilder.setPathPrefix(...)
+//							restClientBuilder.setHttpClientConfigCallback(...)
+//						}
+//				);
+
+				streams.addSink(esSinkBuilder.build());
 				// write to Elasticsearch
-				streams.getSideOutput(i).addSink(new ElasticsearchSink<>(
-					userConfig,
-					transports,
-					(Tuple4<String, String, String, Integer> element, RuntimeContext ctx, RequestIndexer indexer) -> {
-						indexer.add(createIndexRequest(element, parameterTool));
-					}));
-			}*/
+				//streams.getSideOutput(i).addSink(new ElasticsearchSink<Tuple4<String, String, String, Integer>>(userConfig, transports, new EntryInserter()));
+
+
+//				streams.getSideOutput(i).addSink(new ElasticsearchSink<>(
+//					userConfig,
+//					transports,
+//					(Tuple4<String, String, String, Integer> element, RuntimeContext ctx, RequestIndexer indexer) -> {
+//						indexer.add(createIndexRequest(element, parameterTool));
+//					}));
+			}
 		}
 		// execute program
 		env.execute("Streaming ErrorDetection");
@@ -226,17 +277,38 @@ public class StreamingJob {
 		}
 	}
 
-//	private static IndexRequest createIndexRequest(Tuple4<String, String, String, Integer> element, ParameterTool parameterTool) {
-//		Map<String, Object> json = new HashMap<>();
-//		json.put("timestamp", element.f0);
-//		json.put("version", element.f1);
-//		json.put("error_code", element.f2);
-//		json.put("count", element.f3);
-//
-//		return Requests.indexRequest()
-//			.index(parameterTool.getRequired("index"))
-//			.type(parameterTool.getRequired("type"))
-//			.id(element.toString())
-//			.source(json);
-//	}
+	private static IndexRequest createIndexRequest(Tuple4<String, String, String, Integer> element, ParameterTool parameterTool) {
+		Map<String, Object> json = new HashMap<>();
+		json.put("timestamp", element.f0);
+		json.put("version", element.f1);
+		json.put("error_code", element.f2);
+		json.put("count", element.f3);
+
+		return Requests.indexRequest()
+			.index(parameterTool.getRequired("index"))
+			.type(parameterTool.getRequired("type"))
+			.id(element.toString())
+			.source(json);
+	}
+	public static class EntryInserter
+    implements ElasticsearchSinkFunction<Tuple4<String, String, String, Integer>> {
+
+		public IndexRequest createIndexRequest(Tuple4<String, String, String, Integer> element) {
+			Map<String, Object> json = new HashMap<>();
+			json.put("timestamp", element.f0);
+			json.put("version", element.f1);
+			json.put("error_code", element.f2);
+			json.put("count", element.f3);
+
+			return Requests.indexRequest()
+					.index("nyc-places")
+					.type("popular-locations")
+					.source(json);
+		}
+
+		@Override
+		public void process(Tuple4<String, String, String, Integer> element, RuntimeContext ctx, RequestIndexer indexer) {
+			indexer.add(createIndexRequest(element));
+		}
+	}
 }
