@@ -260,7 +260,7 @@ public class StreamingJob {
 			String[] tokens = value.toLowerCase().trim().split("\\s+");
 			// ** token[0] has leading white space/tab but couldn't be removed by trim.
 			// Use following workaround. Keep only non-alphanumeric characters.
-			out.collect(new Tuple4<>(DUMMYDATE + ' ' + tokens[0].replaceAll("^[^a-zA-Z0-9\\s]+|[^a-zA-Z0-9\\s]+$", ""), tokens[1], tokens[2], 1));
+			out.collect(new Tuple4<>(DUMMYDATE + " 0" + tokens[0].replaceAll("^[^a-zA-Z0-9\\s]+|[^a-zA-Z0-9\\s]+$", ""), tokens[1], tokens[2], 1));
 		}
 	}
 

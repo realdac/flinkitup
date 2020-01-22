@@ -14,14 +14,13 @@ curl -H 'Content-Type: application/json' -XPUT "http://localhost:9200/nyc-places
 {
  "popular-locations" : {
    "properties" : {
-      "timestamp": {"type": "text"},
+      "timestamp": { "type": "date", "format": "yyyy-MM-dd HH:mm:ss" },
       "version": {"type": "text"},
       "error_code": {"type": "text"},
       "count": {"type": "integer"}
     }
  }
 }'
-
 
 JOBMANAGER_CONTAINER=$(docker ps --filter name=jobmanager --format={{.ID}})
 
